@@ -77,6 +77,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Adicionar este modelo Pydantic
+class ContactForm(BaseModel):
+    name: str
+    whatsapp: str
+    acceptCommunication: bool = False
+
+# rota ao api_router
+@api_router.post("/contact", response_model=dict)
+async def submit_contact_form(contact: ContactForm):
+    contact_dict = contact.model_dump()
+    contact_dict["id"] = str(uuid.uuid4())
+    contact_dict["timestamp"] = datetime.now(timezone.utc).isoformat()
+    
+    await db.contacts.insert_one(contact_dict)
+    return {"success": True, "message": "Contato recebido com sucesso!"}
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
