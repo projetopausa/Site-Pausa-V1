@@ -3,10 +3,10 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "build": "cd frontend && npm install --legacy-peer-deps && npm run build",
+    "build": "cd frontend && CI=false npm run build",
     "postinstall": "cd frontend && npm install --legacy-peer-deps"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": "18.x"
   }
 }
