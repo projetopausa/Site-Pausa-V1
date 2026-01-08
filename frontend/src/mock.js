@@ -1,6 +1,21 @@
-// Mock data for Portal Pausa landing page
+// Mock data for Portal Pausa landing page - MANTIDO PARA COMPATIBILIDADE
 
+// Função mock mantida para fallback e desenvolvimento
 export const mockSubmitForm = async (formData) => {
+  // Verifica se estamos em desenvolvimento e se a API não está disponível
+  const isDevelopment = process.env.NODE_ENV === 'development';
+  const API_URL = process.env.REACT_APP_API_URL;
+  
+  // Se tiver URL de API, não usa mock (a não ser que explicitamente solicitado)
+  if (API_URL && !formData._useMock) {
+    console.warn('mockSubmitForm chamado, mas REACT_APP_API_URL está definido. Use a API real.');
+    return {
+      success: false,
+      message: 'Use a API real em vez do mock',
+      detail: 'A variável REACT_APP_API_URL está definida no ambiente'
+    };
+  }
+  
   // Simulate API call delay
   await new Promise(resolve => setTimeout(resolve, 1000));
   
@@ -13,6 +28,7 @@ export const mockSubmitForm = async (formData) => {
   return {
     success: true,
     message: 'Obrigada por se cadastrar! Entraremos em contato em breve.',
+    contact_id: `mock_${Math.random().toString(36).substr(2, 9)}`,
     data: {
       id: Math.random().toString(36).substr(2, 9),
       ...formData,
@@ -21,6 +37,39 @@ export const mockSubmitForm = async (formData) => {
   };
 };
 
+// Função real para usar no ContactForm.jsx
+export const submitContactForm = async (formData) => {
+  const API_URL = process.env.REACT_APP_API_URL || 'https://portal-pausa-backend.onrender.com';
+  
+  try {
+    const response = await fetch(`${API_URL}/api/contact`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(formData)
+    });
+    
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `Erro ${response.status}: ${response.statusText}`);
+    }
+    
+    return await response.json();
+  } catch (error) {
+    console.error('Erro ao enviar formulário:', error);
+    
+    // Fallback para mock em desenvolvimento se a API falhar
+    if (process.env.NODE_ENV === 'development') {
+      console.warn('API falhou, usando mock como fallback');
+      return await mockSubmitForm({ ...formData, _useMock: true });
+    }
+    
+    throw error;
+  }
+};
+
+// Dados estáticos mantidos
 export const heroData = {
   headline: "Você não precisa passar por isso sozinha.",
   subheadline: "O Portal Pausa é um abraço digital para mulheres na peri/menopausa. Cuidado inteligente que escuta, acolhe e guia - direto no seu WhatsApp.",
@@ -71,3 +120,30 @@ export const journeySteps = [
     title: "Juntas, transformamos a saúde feminina"
   }
 ];
+
+// Utilitário para testar conexão com a API
+export const testAPIConnection = async () => {
+  const API_URL = process.env.REACT_APP_API_URL || 'https://portal-pausa-backend.onrender.com';
+  
+  try {
+    const startTime = Date.now();
+    const response = await fetch(`${API_URL}/health`);
+    const endTime = Date.now();
+    
+    const data = await response.json().catch(() => ({}));
+    
+    return {
+      connected: response.ok,
+      status: response.status,
+      responseTime: endTime - startTime,
+      data: data,
+      url: API_URL
+    };
+  } catch (error) {
+    return {
+      connected: false,
+      error: error.message,
+      url: API_URL
+    };
+  }
+};
