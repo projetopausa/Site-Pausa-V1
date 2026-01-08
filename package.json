@@ -3,15 +3,9 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "build": "cd frontend && CI=false npm run build",
-    "postinstall": "cd frontend && npm install --legacy-peer-deps"
+    "build": "cd frontend && CI=false yarn build"
   },
   "engines": {
     "node": "18.x"
-  },
-  "overrides": {
-    "ajv": "^8.12.0",
-    "ajv-keywords": "^5.1.0",
-    "schema-utils": "^4.2.0"
   }
 }
