@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, HTTPException
+from fastapi import FastAPI, APIRouter, HTTPException, Request
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional
 import uuid
 from datetime import datetime, timezone
+import ssl
 
 # Configurar logging primeiro
 logging.basicConfig(
@@ -20,80 +21,115 @@ logger = logging.getLogger(__name__)
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-# MongoDB connection with better error handling and compatibility
+# MongoDB connection with SSL/TLS fix for Render.com
 mongo_url = os.environ.get('MONGO_URL', 'mongodb://localhost:27017')
 db_name = os.environ.get('DB_NAME', 'portal_pausa_db')
 
-# Configurações para melhor compatibilidade
-mongo_kwargs = {
-    'serverSelectionTimeoutMS': 10000,  # 10 segundos timeout
-    'connectTimeoutMS': 15000,          # 15 segundos para conectar
-    'socketTimeoutMS': 45000,           # 45 segundos para operações
-    'maxPoolSize': 10,
-    'minPoolSize': 1,
-}
-
-# Variáveis globais (serão inicializadas no startup)
+# Variáveis globais
 client = None
 db = None
 
 async def connect_to_mongodb():
-    """Conecta ao MongoDB com tratamento de erros"""
+    """Conecta ao MongoDB com tratamento de erros e SSL/TLS fix"""
     global client, db
     
     try:
-        logger.info(f"Tentando conectar ao MongoDB: {mongo_url[:50]}...")
+        logger.info(f"🚀 Tentando conectar ao MongoDB...")
         
-        # Remove credenciais do log por segurança
+        # Mostrar URL segura (sem senha) nos logs
         safe_url = mongo_url
         if '@' in safe_url:
             parts = safe_url.split('@')
             safe_url = 'mongodb://***:***@' + parts[1] if len(parts) > 1 else safe_url
+        logger.info(f"📡 URL MongoDB: {safe_url}")
         
-        logger.info(f"URL MongoDB (segura): {safe_url}")
+        # Configurações otimizadas para Render.com + MongoDB Atlas
+        mongo_kwargs = {
+            'serverSelectionTimeoutMS': 10000,
+            'connectTimeoutMS': 15000,
+            'socketTimeoutMS': 30000,
+            'maxPoolSize': 10,
+            'minPoolSize': 1,
+            'retryWrites': True,
+            'w': 'majority',
+        }
+        
+        # FIX CRÍTICO: Configurar SSL/TLS para Render.com
+        if 'mongodb+srv://' in mongo_url or '.mongodb.net' in mongo_url:
+            mongo_kwargs['tls'] = True
+            mongo_kwargs['tlsAllowInvalidCertificates'] = True
+            mongo_kwargs['ssl'] = True
+            mongo_kwargs['ssl_cert_reqs'] = ssl.CERT_NONE
+            logger.info("🔐 Configurando conexão com SSL/TLS para MongoDB Atlas")
         
         client = AsyncIOMotorClient(mongo_url, **mongo_kwargs)
         
-        # Testa conexão imediatamente
+        # Testar conexão
         await client.admin.command('ping')
         
         db = client[db_name]
         logger.info(f"✅ Conectado com sucesso ao MongoDB! Database: {db_name}")
         
-        # Cria collections se não existirem
+        # Verificar collections
         collections = await db.list_collection_names()
-        logger.info(f"Collections disponíveis: {collections}")
+        logger.info(f"📊 Collections disponíveis: {collections}")
+        
+        # Criar collections se não existirem
+        if 'contacts' not in collections:
+            await db.create_collection('contacts')
+            logger.info("📝 Collection 'contacts' criada")
+        
+        if 'status_checks' not in collections:
+            await db.create_collection('status_checks')
+            logger.info("📝 Collection 'status_checks' criada")
         
         return True
         
     except Exception as e:
-        logger.error(f"❌ Erro ao conectar ao MongoDB: {e}")
+        logger.error(f"❌ Erro ao conectar ao MongoDB: {str(e)[:200]}")
         
-        # Tenta conexão alternativa se for URL SRV
-        if 'mongodb+srv://' in mongo_url:
-            logger.info("Tentando conexão alternativa sem SRV...")
-            try:
-                # Converte URL SRV para normal (apenas para log)
-                alt_url = mongo_url.replace('mongodb+srv://', 'mongodb://')
-                alt_url = alt_url.replace('/?', '/portal_pausa_db?')
-                logger.info(f"URL alternativa: {alt_url[:60]}...")
-            except:
-                pass
+        # Tentar conexão alternativa
+        try:
+            logger.info("🔄 Tentando conexão alternativa...")
+            alt_kwargs = {
+                'serverSelectionTimeoutMS': 5000,
+                'connectTimeoutMS': 10000,
+                'maxPoolSize': 5,
+                'retryWrites': True,
+                'w': 'majority',
+            }
+            
+            alt_url = mongo_url.replace('&tls=true', '').replace('?tls=true', '?')
+            alt_url = alt_url.replace('&ssl=true', '').replace('?ssl=true', '?')
+            
+            temp_client = AsyncIOMotorClient(alt_url, **alt_kwargs)
+            await temp_client.admin.command('ping')
+            temp_client.close()
+            logger.info("⚠️  Conexão alternativa funcionou (sem SSL)")
+            
+        except Exception as alt_e:
+            logger.error(f"❌ Conexão alternativa também falhou: {str(alt_e)[:100]}")
         
-        # Permite que o app inicie mesmo sem DB (para debug)
+        # Permite que o app inicie mesmo sem DB
         client = None
         db = None
         return False
 
-# Create the main app without a prefix
-app = FastAPI(title="Portal Pausa API", version="1.0.0")
+# Create the main app
+app = FastAPI(
+    title="Portal Pausa API",
+    version="1.0.0",
+    description="API Backend para o Portal Pausa - Saúde Feminina",
+    docs_url="/docs",
+    redoc_url="/redoc"
+)
 
 # Create a router with the /api prefix
 api_router = APIRouter(prefix="/api")
 
 # Define Models
 class StatusCheck(BaseModel):
-    model_config = ConfigDict(extra="ignore")  # Ignore MongoDB's _id field
+    model_config = ConfigDict(extra="ignore")
     
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     client_name: str
@@ -102,17 +138,18 @@ class StatusCheck(BaseModel):
 class StatusCheckCreate(BaseModel):
     client_name: str
 
+# **MODELO CORRIGIDO: APENAS OS CAMPOS QUE O FRONTEND ENVIA**
 class ContactForm(BaseModel):
-    name: str
-    whatsapp: str
-    acceptCommunication: bool = False
+    name: str = Field(..., min_length=2, max_length=100, description="Como gostaria de ser chamada?")
+    whatsapp: str = Field(..., description="WhatsApp para contato no formato (DDD) 9XXXX-XXXX")
+    acceptCommunication: bool = Field(default=False, description="Aceita receber comunicações")
 
 class ContactResponse(BaseModel):
     success: bool
     message: str
     contact_id: Optional[str] = None
 
-# Health check endpoint
+# ========== ROTAS DO APP (sem prefixo) ==========
 @app.get("/")
 async def root():
     return {
@@ -123,8 +160,11 @@ async def root():
             "api_docs": "/docs",
             "api_redoc": "/redoc",
             "health": "/health",
+            "status": "/status",
             "api_root": "/api/",
-            "api_contact": "/api/contact"
+            "api_health": "/api/health",
+            "api_contact": "/api/contact",
+            "api_test_db": "/api/test-db"
         }
     }
 
@@ -137,31 +177,59 @@ async def health_check():
         try:
             await client.admin.command('ping')
             db_status = "connected"
-        except:
-            db_status = "error"
+        except Exception as e:
+            logger.error(f"Erro no health check do MongoDB: {e}")
+            db_status = f"error: {str(e)[:50]}"
     
     return {
         "status": "healthy" if db_status == "connected" else "degraded",
         "database": db_status,
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "service": "Portal Pausa Backend"
+        "service": "Portal Pausa Backend",
+        "environment": os.environ.get('RENDER_EXTERNAL_HOSTNAME', 'local'),
+        "version": "1.0.0"
     }
 
-# Add your routes to the router instead of directly to app
+@app.get("/status")
+async def status():
+    """Endpoint simples de status"""
+    return {
+        "status": "online",
+        "service": "Portal Pausa API",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "documentation": "/docs"
+    }
+
+# ========== ROTAS DA API (com prefixo /api) ==========
 @api_router.get("/")
 async def api_root():
     return {
         "message": "Portal Pausa API",
         "version": "1.0.0",
         "endpoints": [
+            "GET    /health",
             "GET    /status",
             "POST   /status",
-            "POST   /contact"
+            "POST   /contact",
+            "GET    /test-db"
         ]
+    }
+
+@api_router.get("/health")
+async def api_health():
+    """Health check específico da API"""
+    db_status = "connected" if client else "disconnected"
+    
+    return {
+        "api": "running",
+        "database": db_status,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "uptime": "unknown"
     }
 
 @api_router.post("/status", response_model=StatusCheck)
 async def create_status_check(input: StatusCheckCreate):
+    """Cria um novo registro de status check"""
     if db is None:
         raise HTTPException(status_code=503, detail="Database não disponível")
     
@@ -169,77 +237,87 @@ async def create_status_check(input: StatusCheckCreate):
         status_dict = input.model_dump()
         status_obj = StatusCheck(**status_dict)
         
-        # Convert to dict and serialize datetime to ISO string for MongoDB
         doc = status_obj.model_dump()
         doc['timestamp'] = doc['timestamp'].isoformat()
         
         result = await db.status_checks.insert_one(doc)
         
         if result.inserted_id:
+            logger.info(f"✅ Status check salvo: {status_obj.client_name}")
             return status_obj
         else:
             raise HTTPException(status_code=500, detail="Erro ao salvar status")
             
     except Exception as e:
-        logger.error(f"Erro em /status: {e}")
-        raise HTTPException(status_code=500, detail=f"Erro interno: {str(e)}")
+        logger.error(f"❌ Erro em /status: {e}")
+        raise HTTPException(status_code=500, detail=f"Erro interno: {str(e)[:100]}")
 
 @api_router.get("/status", response_model=List[StatusCheck])
 async def get_status_checks():
+    """Retorna todos os status checks"""
     if db is None:
         raise HTTPException(status_code=503, detail="Database não disponível")
     
     try:
-        # Exclude MongoDB's _id field from the query results
-        status_checks = await db.status_checks.find({}, {"_id": 0}).to_list(1000)
+        cursor = db.status_checks.find({}, {"_id": 0})
+        status_checks = await cursor.to_list(1000)
         
-        # Convert ISO string timestamps back to datetime objects
         for check in status_checks:
             if isinstance(check['timestamp'], str):
-                check['timestamp'] = datetime.fromisoformat(check['timestamp'])
+                try:
+                    check['timestamp'] = datetime.fromisoformat(check['timestamp'].replace('Z', '+00:00'))
+                except:
+                    check['timestamp'] = datetime.now(timezone.utc)
         
         return status_checks
         
     except Exception as e:
-        logger.error(f"Erro em GET /status: {e}")
-        raise HTTPException(status_code=500, detail=f"Erro interno: {str(e)}")
+        logger.error(f"❌ Erro em GET /status: {e}")
+        raise HTTPException(status_code=500, detail=f"Erro interno: {str(e)[:100]}")
 
 @api_router.post("/contact", response_model=ContactResponse)
 async def submit_contact_form(contact: ContactForm):
     """Endpoint para receber formulário de contato do Portal Pausa"""
     
+    logger.info(f"📥 Recebendo contato de: {contact.name}")
+    
     if db is None:
-        logger.error("Tentativa de acesso ao endpoint /contact com database não disponível")
-        raise HTTPException(
-            status_code=503, 
-            detail="Serviço temporariamente indisponível. Tente novamente em alguns instantes."
+        logger.error("❌ Database não disponível para salvar contato")
+        return ContactResponse(
+            success=False,
+            message="Serviço temporariamente indisponível. Por favor, tente novamente em alguns minutos.",
+            contact_id=None
         )
     
     try:
-        logger.info(f"Recebendo contato: {contact.name} - {contact.whatsapp[:10]}...")
+        # Log dos dados recebidos
+        logger.info(f"📋 Dados recebidos - Nome: {contact.name}, WhatsApp: {contact.whatsapp}, Aceita comunicação: {contact.acceptCommunication}")
         
-        # Validação adicional do WhatsApp
+        # Validação do WhatsApp
         whatsapp_clean = ''.join(filter(str.isdigit, contact.whatsapp))
         if len(whatsapp_clean) < 10:
-            raise HTTPException(
-                status_code=400, 
-                detail="Número de WhatsApp inválido. Use o formato (XX) XXXXX-XXXX"
+            logger.warning(f"⚠️ WhatsApp inválido: {contact.whatsapp}")
+            return ContactResponse(
+                success=False,
+                message="Por favor, insira um número de WhatsApp válido no formato (DDD) 9XXXX-XXXX.",
+                contact_id=None
             )
         
         contact_dict = contact.model_dump()
         contact_dict["id"] = str(uuid.uuid4())
         contact_dict["timestamp"] = datetime.now(timezone.utc)
         contact_dict["whatsapp_clean"] = whatsapp_clean
+        contact_dict["source"] = "portal_pausa_website"
         
-        # Formata timestamp para ISO string para MongoDB
+        # Formatar para MongoDB
         contact_dict_for_db = contact_dict.copy()
         contact_dict_for_db["timestamp"] = contact_dict["timestamp"].isoformat()
         
-        # Salva no MongoDB
+        # Salvar no MongoDB
         result = await db.contacts.insert_one(contact_dict_for_db)
         
         if result.inserted_id:
-            logger.info(f"Contato salvo com sucesso: {contact_dict['id']}")
+            logger.info(f"✅ Contato salvo com sucesso! ID: {contact_dict['id']}")
             
             return ContactResponse(
                 success=True, 
@@ -247,20 +325,60 @@ async def submit_contact_form(contact: ContactForm):
                 contact_id=contact_dict["id"]
             )
         else:
-            logger.error("Falha ao inserir contato no MongoDB")
-            raise HTTPException(
-                status_code=500, 
-                detail="Erro ao salvar seu contato. Por favor, tente novamente."
+            logger.error("❌ Falha ao inserir contato no MongoDB (sem inserted_id)")
+            return ContactResponse(
+                success=False,
+                message="Desculpe, ocorreu um erro ao salvar seu contato. Tente novamente.",
+                contact_id=None
             )
             
-    except HTTPException:
-        raise  # Re-lança exceções HTTP já tratadas
     except Exception as e:
-        logger.error(f"Erro no endpoint /contact: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=500, 
-            detail="Desculpe, ocorreu um erro interno. Por favor, tente novamente mais tarde."
+        logger.error(f"💥 Erro no endpoint /contact: {str(e)}", exc_info=True)
+        return ContactResponse(
+            success=False,
+            message="Desculpe, ocorreu um erro interno. Por favor, tente novamente mais tarde.",
+            contact_id=None
         )
+
+# Test endpoint for MongoDB connectivity
+@api_router.get("/test-db")
+async def test_database():
+    """Endpoint para testar conectividade com o MongoDB"""
+    if db is None:
+        return {
+            "status": "error",
+            "message": "Database não conectado",
+            "mongo_url_preview": mongo_url[:50] + "..." if len(mongo_url) > 50 else mongo_url,
+            "environment": os.environ.get('RENDER_EXTERNAL_HOSTNAME', 'local'),
+            "fix_suggestion": "Verifique a variável MONGO_URL e as configurações de SSL/TLS"
+        }
+    
+    try:
+        # Testar ping
+        ping_result = await client.admin.command('ping')
+        
+        # Contar documentos
+        contacts_count = await db.contacts.count_documents({})
+        status_count = await db.status_checks.count_documents({})
+        
+        return {
+            "status": "connected",
+            "message": "✅ MongoDB conectado com sucesso!",
+            "database": db_name,
+            "collections": {
+                "contacts": contacts_count,
+                "status_checks": status_count
+            },
+            "environment": os.environ.get('RENDER_EXTERNAL_HOSTNAME', 'local')
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"❌ Erro ao conectar com MongoDB: {str(e)}",
+            "database": db_name,
+            "environment": os.environ.get('RENDER_EXTERNAL_HOSTNAME', 'local'),
+            "mongo_url_preview": mongo_url[:30] + "..."
+        }
 
 # Include the router in the main app
 app.include_router(api_router)
@@ -305,7 +423,6 @@ async def log_requests(request, call_next):
     """Middleware para log de todas as requisições"""
     start_time = datetime.now(timezone.utc)
     
-    # Gera ID único para a requisição
     request_id = str(uuid.uuid4())[:8]
     
     logger.info(f"📥 [{request_id}] {request.method} {request.url.path}")
@@ -316,7 +433,6 @@ async def log_requests(request, call_next):
         
         logger.info(f"📤 [{request_id}] {request.method} {request.url.path} - Status: {response.status_code} - Tempo: {process_time:.2f}ms")
         
-        # Adiciona headers de debug
         response.headers["X-Request-ID"] = request_id
         response.headers["X-Process-Time"] = f"{process_time:.2f}ms"
         
@@ -326,42 +442,3 @@ async def log_requests(request, call_next):
         process_time = (datetime.now(timezone.utc) - start_time).total_seconds() * 1000
         logger.error(f"💥 [{request_id}] {request.method} {request.url.path} - Erro: {str(e)} - Tempo: {process_time:.2f}ms")
         raise
-
-# Test endpoint for MongoDB connectivity
-@api_router.get("/test-db")
-async def test_database():
-    """Endpoint para testar conectividade com o MongoDB"""
-    if db is None:
-        return {
-            "status": "error",
-            "message": "Database não conectado",
-            "mongo_url": mongo_url[:50] + "..." if len(mongo_url) > 50 else mongo_url,
-            "environment": os.environ.get('RENDER', 'local')
-        }
-    
-    try:
-        # Testa ping
-        await client.admin.command('ping')
-        
-        # Conta documentos
-        contacts_count = await db.contacts.count_documents({})
-        status_count = await db.status_checks.count_documents({})
-        
-        return {
-            "status": "connected",
-            "message": "✅ MongoDB conectado com sucesso!",
-            "database": db_name,
-            "collections": {
-                "contacts": contacts_count,
-                "status_checks": status_count
-            },
-            "environment": os.environ.get('RENDER', 'local')
-        }
-    except Exception as e:
-        return {
-            "status": "error",
-            "message": f"❌ Erro ao conectar com MongoDB: {str(e)}",
-            "database": db_name,
-            "environment": os.environ.get('RENDER', 'local'),
-            "mongo_url_preview": mongo_url[:30] + "..."
-        }
