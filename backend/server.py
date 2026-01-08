@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Request
+from fastapi import FastAPI, APIRouter, HTTPException
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -9,7 +9,6 @@ from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional
 import uuid
 from datetime import datetime, timezone
-import ssl
 
 # Configurar logging primeiro
 logging.basicConfig(
@@ -54,13 +53,12 @@ async def connect_to_mongodb():
             'w': 'majority',
         }
         
-        # FIX CRÍTICO: Configurar SSL/TLS para Render.com
+        # FIX CRÍTICO: Configurar TLS para MongoDB Atlas (sem ssl_cert_reqs)
         if 'mongodb+srv://' in mongo_url or '.mongodb.net' in mongo_url:
+            # Para MongoDB Atlas no Render, use apenas tls
             mongo_kwargs['tls'] = True
             mongo_kwargs['tlsAllowInvalidCertificates'] = True
-            mongo_kwargs['ssl'] = True
-            mongo_kwargs['ssl_cert_reqs'] = ssl.CERT_NONE
-            logger.info("🔐 Configurando conexão com SSL/TLS para MongoDB Atlas")
+            logger.info("🔐 Configurando conexão com TLS para MongoDB Atlas")
         
         client = AsyncIOMotorClient(mongo_url, **mongo_kwargs)
         
@@ -88,9 +86,9 @@ async def connect_to_mongodb():
     except Exception as e:
         logger.error(f"❌ Erro ao conectar ao MongoDB: {str(e)[:200]}")
         
-        # Tentar conexão alternativa
+        # Tentar conexão alternativa sem TLS (apenas para debug)
         try:
-            logger.info("🔄 Tentando conexão alternativa...")
+            logger.info("🔄 Tentando conexão alternativa sem TLS...")
             alt_kwargs = {
                 'serverSelectionTimeoutMS': 5000,
                 'connectTimeoutMS': 10000,
@@ -99,13 +97,14 @@ async def connect_to_mongodb():
                 'w': 'majority',
             }
             
+            # Remover TLS da URL
             alt_url = mongo_url.replace('&tls=true', '').replace('?tls=true', '?')
-            alt_url = alt_url.replace('&ssl=true', '').replace('?ssl=true', '?')
+            alt_url = alt_url.replace('&tlsAllowInvalidCertificates=true', '')
             
             temp_client = AsyncIOMotorClient(alt_url, **alt_kwargs)
             await temp_client.admin.command('ping')
             temp_client.close()
-            logger.info("⚠️  Conexão alternativa funcionou (sem SSL)")
+            logger.info("⚠️  Conexão alternativa funcionou (sem TLS)")
             
         except Exception as alt_e:
             logger.error(f"❌ Conexão alternativa também falhou: {str(alt_e)[:100]}")
@@ -138,7 +137,7 @@ class StatusCheck(BaseModel):
 class StatusCheckCreate(BaseModel):
     client_name: str
 
-# **MODELO CORRIGIDO: APENAS OS CAMPOS QUE O FRONTEND ENVIA**
+# Modelo CORRIGIDO: APENAS os campos que o frontend envia
 class ContactForm(BaseModel):
     name: str = Field(..., min_length=2, max_length=100, description="Como gostaria de ser chamada?")
     whatsapp: str = Field(..., description="WhatsApp para contato no formato (DDD) 9XXXX-XXXX")
@@ -350,7 +349,7 @@ async def test_database():
             "message": "Database não conectado",
             "mongo_url_preview": mongo_url[:50] + "..." if len(mongo_url) > 50 else mongo_url,
             "environment": os.environ.get('RENDER_EXTERNAL_HOSTNAME', 'local'),
-            "fix_suggestion": "Verifique a variável MONGO_URL e as configurações de SSL/TLS"
+            "fix_suggestion": "Verifique a variável MONGO_URL e as configurações de TLS"
         }
     
     try:
