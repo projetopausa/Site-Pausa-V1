@@ -9,6 +9,8 @@ from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional
 import uuid
 from datetime import datetime, timezone
+from pymongo.mongo_client import MongoClient
+from pymongo.server_api import ServerApi
 
 # Configurar logging primeiro
 logging.basicConfig(
