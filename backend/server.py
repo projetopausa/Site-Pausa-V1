@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, HTTPException
+from fastapi import FastAPI, APIRouter, HTTPException, Request
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 import os
@@ -8,7 +8,8 @@ from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional
 import uuid
 from datetime import datetime, timezone
-import httpx  # Para fazer requisições HTTP assíncronas
+import httpx
+from fastapi.responses import JSONResponse  # ADICIONE ESTA LINHA
 
 # Configurar logging primeiro
 logging.basicConfig(
@@ -20,6 +21,8 @@ logger = logging.getLogger(__name__)
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
+# URL do seu Google Apps Script Web App (COLE A NOVA URL AQUI DEPOIS DO DEPLOY CORRETO)
+GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbwLndrbygG7Je7C7htmrf_9AMCwgKy6sXRuckAW6RVUXv1hQwlQbIWwjpKDe1xZkkrc/exec"
 # Create the main app
 app = FastAPI(
     title="Portal Pausa API",
@@ -29,11 +32,21 @@ app = FastAPI(
     redoc_url="/redoc"
 )
 
+# Configure CORS PRIMEIRO, antes de criar o router
+cors_origins = os.environ.get('CORS_ORIGINS', '*').split(',') if os.environ.get('CORS_ORIGINS', '*') != '*' else ["*"]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=cors_origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "OPTIONS", "PUT", "DELETE", "PATCH", "HEAD"],
+    allow_headers=["*"],
+    expose_headers=["*"],
+    max_age=600,  # Cache de preflight por 10 minutos
+)
+
 # Create a router with the /api prefix
 api_router = APIRouter(prefix="/api")
-
-# URL do seu Google Apps Script Web App (COLE A SUA AQUI)
-GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbwLndrbygG7Je7C7htmrf_9AMCwgKy6sXRuckAW6RVUXv1hQwlQbIWwjpKDe1xZkkrc/exec"
 
 # Define Models
 class StatusCheck(BaseModel):
@@ -84,7 +97,7 @@ async def health_check():
         "service": "Portal Pausa Backend",
         "environment": os.environ.get('RENDER_EXTERNAL_HOSTNAME', 'local'),
         "version": "1.0.0",
-        "database": "google_sheets"  # Agora estamos usando Google Sheets
+        "database": "google_sheets"
     }
 
 @app.get("/status")
@@ -98,17 +111,6 @@ async def status():
     }
 
 # ========== ROTAS DA API (com prefixo /api) ==========
-
-@api_router.options("/contact")
-async def options_contact():
-    """Endpoint para lidar com requisições preflight OPTIONS do navegador"""
-    return {
-        "message": "CORS preflight",
-        "allowed_methods": ["POST", "OPTIONS"],
-        "allowed_headers": ["Content-Type", "Authorization", "Accept"],
-        "allow_credentials": True
-    }
-
 @api_router.get("/")
 async def api_root():
     return {
@@ -150,16 +152,28 @@ async def create_status_check(input: StatusCheckCreate):
 async def get_status_checks():
     """Retorna todos os status checks (simulado)"""
     try:
-        # Esta é uma versão simulada - em produção, você pode querer
-        # buscar de um arquivo ou outra fonte
         return []
         
     except Exception as e:
         logger.error(f"❌ Erro em GET /status: {e}")
         raise HTTPException(status_code=500, detail=f"Erro interno: {str(e)[:100]}")
 
+# ADICIONE ESTA ROTA OPTIONS ESPECÍFICA
+@api_router.options("/contact")
+async def options_contact(request: Request):
+    """Endpoint específico para requisições OPTIONS (preflight CORS)"""
+    # Retorna uma resposta vazia com os headers CORS apropriados
+    headers = {
+        "Access-Control-Allow-Origin": request.headers.get("origin", "*"),
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization, Accept",
+        "Access-Control-Allow-Credentials": "true",
+        "Access-Control-Max-Age": "600"  # 10 minutos
+    }
+    return JSONResponse(content={}, headers=headers)
+
 @api_router.post("/contact", response_model=ContactResponse)
-async def submit_contact_form(contact: ContactForm):
+async def submit_contact_form(contact: ContactForm, request: Request):
     """Endpoint para receber formulário de contato e salvar no Google Sheets"""
     
     logger.info(f"📥 Recebendo contato de: {contact.name}")
@@ -183,7 +197,6 @@ async def submit_contact_form(contact: ContactForm):
         timestamp = datetime.now(timezone.utc).isoformat()
         
         # Dados que serão enviados para o Google Sheets
-        # A ORDEM DOS CAMPOS DEVE SER EXATAMENTE A MESMA QUE NO SEU GOOGLE APPS SCRIPT
         sheet_data = {
             "id": contact_id,
             "timestamp": timestamp,
@@ -198,32 +211,43 @@ async def submit_contact_form(contact: ContactForm):
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(
                 GOOGLE_SCRIPT_URL,
-                json=sheet_data,  # Envia como JSON
-                headers={"Content-Type": "application/json"}
+                json=sheet_data,
+                headers={"Content-Type": "application/json"},
+                follow_redirects=True  # IMPORTANTE: Segue redirecionamentos
             )
         
         # Verificar a resposta do Google Apps Script
         if response.status_code == 200:
-            response_data = response.json()
-            
-            if response_data.get("result") == "success":
-                logger.info(f"✅ Contato salvo no Google Sheets! ID: {contact_id}")
+            try:
+                response_data = response.json()
                 
-                return ContactResponse(
-                    success=True, 
-                    message="Obrigada por se cadastrar! Entraremos em contato em breve. 💜",
-                    contact_id=contact_id
-                )
-            else:
-                error_msg = response_data.get("error", "Erro desconhecido do Google Sheets")
-                logger.error(f"❌ Google Sheets respondeu com erro: {error_msg}")
+                if response_data.get("result") == "success":
+                    logger.info(f"✅ Contato salvo no Google Sheets! ID: {contact_id}")
+                    
+                    return ContactResponse(
+                        success=True, 
+                        message="Obrigada por se cadastrar! Entraremos em contato em breve. 💜",
+                        contact_id=contact_id
+                    )
+                else:
+                    error_msg = response_data.get("error", "Erro desconhecido do Google Sheets")
+                    logger.error(f"❌ Google Sheets respondeu com erro: {error_msg}")
+                    return ContactResponse(
+                        success=False,
+                        message="Desculpe, ocorreu um erro ao salvar seus dados. Tente novamente.",
+                        contact_id=None
+                    )
+            except:
+                # Se não for JSON válido, pode ser um redirecionamento
+                logger.error(f"❌ Resposta inválida do Google Sheets: {response.text[:100]}")
                 return ContactResponse(
                     success=False,
-                    message="Desculpe, ocorreu um erro ao salvar seus dados. Tente novamente.",
+                    message="Serviço temporariamente indisponível. Tente novamente em alguns instantes.",
                     contact_id=None
                 )
         else:
             logger.error(f"❌ Falha na comunicação com Google Sheets. Status: {response.status_code}")
+            logger.error(f"❌ Resposta: {response.text[:200]}")
             return ContactResponse(
                 success=False,
                 message="Desculpe, serviço temporariamente indisponível. Tente novamente em alguns instantes.",
@@ -247,17 +271,6 @@ async def submit_contact_form(contact: ContactForm):
 
 # Include the router in the main app
 app.include_router(api_router)
-
-# Configure CORS
-cors_origins = os.environ.get('CORS_ORIGINS', '*')
-app.add_middleware(
-    CORSMiddleware,
-    allow_credentials=True,
-    allow_origins=cors_origins.split(',') if cors_origins != '*' else ["*"],
-    allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["*"],
-    expose_headers=["*"]
-)
 
 # Event handlers
 @app.on_event("startup")
