@@ -33,7 +33,7 @@ app = FastAPI(
 api_router = APIRouter(prefix="/api")
 
 # URL do seu Google Apps Script Web App (COLE A SUA AQUI)
-GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbzsGewXtdjrnuJY4OAb7rW-XtRqD8v6Xg1ZDOzAa7jKc_yNu77u36VLEIbAvvpjXYyw/exec"
+GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbwLndrbygG7Je7C7htmrf_9AMCwgKy6sXRuckAW6RVUXv1hQwlQbIWwjpKDe1xZkkrc/exec"
 
 # Define Models
 class StatusCheck(BaseModel):
