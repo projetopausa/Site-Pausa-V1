@@ -33,7 +33,7 @@ app = FastAPI(
 api_router = APIRouter(prefix="/api")
 
 # URL do seu Google Apps Script Web App (COLE A SUA AQUI)
-GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbzVUtxNlMpI22Z7bk8uZCujzy9YxqxpLzDO3gceGJpADcBRB9eMqqrNKmjUA3kVRPBb/exec"
+GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbzsGewXtdjrnuJY4OAb7rW-XtRqD8v6Xg1ZDOzAa7jKc_yNu77u36VLEIbAvvpjXYyw/exec"
 
 # Define Models
 class StatusCheck(BaseModel):
@@ -98,6 +98,17 @@ async def status():
     }
 
 # ========== ROTAS DA API (com prefixo /api) ==========
+
+@api_router.options("/contact")
+async def options_contact():
+    """Endpoint para lidar com requisições preflight OPTIONS do navegador"""
+    return {
+        "message": "CORS preflight",
+        "allowed_methods": ["POST", "OPTIONS"],
+        "allowed_headers": ["Content-Type", "Authorization", "Accept"],
+        "allow_credentials": True
+    }
+
 @api_router.get("/")
 async def api_root():
     return {
